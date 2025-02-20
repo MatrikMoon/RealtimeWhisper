@@ -1,3 +1,34 @@
+import socket
+import pyaudio
+
+# Audio Config
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 48000
+CHUNK = 960  # Same size as the sender
+
+# Server Config (UDP)
+HOST = "0.0.0.0"
+PORT = 5000
+
+# Initialize PyAudio
+audio = pyaudio.PyAudio()
+stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
+
+# Setup UDP Socket
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+server_socket.bind((HOST, PORT))
+
+print(f"Listening for raw PCM audio on {HOST}:{PORT}...")
+
+while True:
+    try:
+        raw_data, _ = server_socket.recvfrom(CHUNK * 2)  # Each sample is 2 bytes (16-bit PCM)
+        stream.write(raw_data)
+    except Exception as e:
+        print(f"Error: {e}")
+        break
+
 #! python3.7
 
 import argparse
@@ -14,8 +45,6 @@ from queue import Queue
 from time import sleep
 from sys import platform
 
-def flush(text: str):
-    pyautogui.write("say " + text + "\n", interval=0.01)  # Simulates key presses
 
 def main():
     parser = argparse.ArgumentParser()
@@ -27,7 +56,7 @@ def main():
                         help="Energy level for mic to detect.", type=int)
     parser.add_argument("--record_timeout", default=3,
                         help="How real time the recording is in seconds.", type=float)
-    parser.add_argument("--phrase_timeout", default=4,
+    parser.add_argument("--phrase_timeout", default=1,
                         help="How much empty space between recordings before we "
                              "consider it a new line in the transcription.", type=float)
     if 'linux' in platform:
@@ -42,7 +71,6 @@ def main():
 
     # The last time a recording was retrieved from the queue.
     phrase_time = None
-    needs_flush = False
     # Thread safe Queue for passing data from the threaded recording callback.
     data_queue = Queue()
     # We use SpeechRecognizer to record our audio because it has a nice feature where it can detect when speech ends.
@@ -101,12 +129,6 @@ def main():
     while True:
         try:
             now = datetime.utcnow()
-
-            # Check if it's time to flush the text
-            if needs_flush and now - phrase_time > timedelta(seconds=phrase_timeout):
-                needs_flush = False
-                flush(transcription[-1])
-                
             # Pull raw recorded audio from the queue.
             if not data_queue.empty():
                 phrase_complete = False
@@ -135,12 +157,10 @@ def main():
                 if phrase_complete:
                     print('(pause)')
                     transcription.append(text)
-                    needs_flush = True
                     # pyautogui.write("say " + text + "\n", interval=0.01)  # Simulates key presses
                 else:
                     print('(no pause)')
-                    transcription[-1] += " " + text
-                    needs_flush = True
+                    transcription[-1] = text
                     # pyautogui.write("say " + text + " (?)\n", interval=0.01)  # Simulates key presses
 
                 # Clear the console to reprint the updated transcription.
@@ -152,7 +172,6 @@ def main():
             else:
                 # Infinite loops are bad for processors, must sleep.
                 sleep(0.25)
-                
         except KeyboardInterrupt:
             break
 
