@@ -90,6 +90,7 @@ def main():
         # Grab the raw bytes and push it into the thread safe queue.
         data = audio.get_raw_data()
         data_queue.put(data)
+        print("callbnac")
 
     # Create a background thread that will pass us raw audio bytes.
     # We could do this manually but SpeechRecognizer provides a nice helper.

@@ -1,5 +1,5 @@
 import asyncio
-import json
+import ssl
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
 from aiortc.contrib.media import MediaRecorder
@@ -17,7 +17,7 @@ class AudioTrack(MediaStreamTrack):
 
     async def recv(self):
         frame = await self.track.recv()
-        print("🎤 Received audio frame!")  # ✅ Debug: Log received audio
+        # print("🎤 Received audio frame!")  # ✅ Debug: Log received audio
         return frame
 
 async def offer(request):
@@ -109,7 +109,24 @@ app.router.add_post("/ice-candidate", ice_candidate)
 for route in list(app.router.routes()):
     cors.add(route)
 
-# Start cleanup task
-asyncio.ensure_future(cleanup())
+async def start_server():
+    """ Starts the WebRTC server and cleanup task """
+    # Start cleanup in background
+    asyncio.create_task(cleanup())  # ✅ Use create_task() instead of ensure_future()
 
-web.run_app(app, port=5000)
+    # Load SSL certificate & key
+    ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    ssl_context.load_cert_chain(certfile="cert1.pem", keyfile="privkey1.pem")
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, port=5000, ssl_context=ssl_context)
+    print("🚀 WebRTC server is running on HTTPS!")
+    await site.start()
+
+    # ✅ Keep the event loop alive
+    while True:
+        await asyncio.sleep(3600)  # Sleep indefinitely to keep server running
+
+# ✅ Properly start asyncio event loop
+asyncio.run(start_server())
