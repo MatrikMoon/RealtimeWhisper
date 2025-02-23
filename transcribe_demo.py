@@ -8,18 +8,30 @@ import torch.version
 import whisper
 import torch
 import pyautogui
-
+import pyaudio
 from datetime import datetime, timedelta
 from queue import Queue
 from time import sleep
 from sys import platform
 
+# Audio Config
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+CHUNK = 1
+
+# Initialize PyAudio
+audio = pyaudio.PyAudio()
+stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
+
+
 def flush(text: str):
-    pyautogui.write("say " + text + "\n", interval=0.01)  # Simulates key presses
+    print(f"Flushing: {text}")
+    # pyautogui.write("say " + text + "\n", interval=0.01)  # Simulates key presses
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="turbo", help="Model to use",
+    parser.add_argument("--model", default="medium.en", help="Model to use",
                         choices=["tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large", "turbo"])
     parser.add_argument("--non_english", action='store_true',
                         help="Don't use the english model.")
@@ -90,7 +102,7 @@ def main():
         # Grab the raw bytes and push it into the thread safe queue.
         data = audio.get_raw_data()
         data_queue.put(data)
-        print("callbnac")
+        stream.write(data)
 
     # Create a background thread that will pass us raw audio bytes.
     # We could do this manually but SpeechRecognizer provides a nice helper.

@@ -1,24 +1,70 @@
 import asyncio
 import ssl
+import numpy as np
+import base64
+from datetime import datetime
+from transcriber import SpeechTranscriber
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
-from aiortc.contrib.media import MediaRecorder
+from aiortc.contrib.media import MediaRecorder, MediaPlayer
 from aiohttp_cors import setup as setup_cors, ResourceOptions
 
 # Store active peer connections
-pcs = set()  
+pcs = set()
 
-class AudioTrack(MediaStreamTrack):
+def flush_callback(response):
+    # Convert the response into a wav and save it
+    audio_bytes = base64.b64decode(response["audio"])
+    file_name = f'response_{str(datetime.now().strftime("%Y-%m-%d %H-%M-%S"))}.wav'
+
+    # Write the decoded audio bytes to a file
+    with open(file_name, 'wb') as f:
+        f.write(audio_bytes)
+
+    # Get ready to play the file on the RTC connections
+    player = MediaPlayer(file_name)
+
+    for pc in pcs:
+        casted_pc: RTCPeerConnection = pc
+        print(f'Playing response: {response["response"]}')
+        casted_pc.addTrack(player.audio)
+
+transcriber = SpeechTranscriber(flush_callback)
+
+class TranscribingAudioTrack(MediaStreamTrack):
     kind = "audio"
 
-    def __init__(self, track):
+    def __init__(self, track: MediaStreamTrack):
         super().__init__()
         self.track = track
 
     async def recv(self):
         frame = await self.track.recv()
-        # print("🎤 Received audio frame!")  # ✅ Debug: Log received audio
+        pcm_bytes = self.frame_to_pcm(frame)
+        transcriber.add_audio_frame(pcm_bytes)
         return frame
+
+    def frame_to_pcm(self, frame):
+        """ Extract PCM bytes from an AudioFrame and ensure correct sample rate """
+        # ✅ Ensure sample format is 16-bit PCM
+        pcm_bytes = frame.planes[0]
+
+        # ✅ Check sample rate (WebRTC usually sends 48000Hz, but verify)
+        # I have found this to lie -Moon
+        if frame.sample_rate != 16000:
+            # print(f"🔄 Resampling from {frame.sample_rate}Hz to 48000Hz...")
+            pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16)
+
+            # ✅ Resample to 48000Hz using NumPy (simple nearest-neighbor method)
+            resampled_array = np.interp(
+                np.linspace(0, len(pcm_array), int(len(pcm_array) * (16000 / 96000))),
+                np.arange(len(pcm_array)),
+                pcm_array
+            ).astype(np.int16)
+
+            return resampled_array.tobytes()
+
+        return pcm_bytes
 
 async def offer(request):
     global pcs  # Keep track of connections
@@ -35,7 +81,7 @@ async def offer(request):
         if track.kind == "audio":
             print("🎙️ Audio track received! Starting processing...")
             recorder = MediaRecorder(f"output_{id(pc)}.wav")  # Save per connection
-            recorder.addTrack(AudioTrack(track))
+            recorder.addTrack(TranscribingAudioTrack(track))
             await recorder.start()
 
     # Handle disconnections (Cleanup)
@@ -124,9 +170,19 @@ async def start_server():
     print("🚀 WebRTC server is running on HTTPS!")
     await site.start()
 
+    transcriber.start_processing()
+
+    running = True
+
     # ✅ Keep the event loop alive
-    while True:
-        await asyncio.sleep(3600)  # Sleep indefinitely to keep server running
+    while running:
+        try:
+            await asyncio.sleep(3600)  # Sleep indefinitely to keep server running
+        except (KeyboardInterrupt, asyncio.exceptions.CancelledError):
+            transcriber.stop_processing()
+            await runner.shutdown()
+            await runner.cleanup()
+            running = False
 
 # ✅ Properly start asyncio event loop
 asyncio.run(start_server())
