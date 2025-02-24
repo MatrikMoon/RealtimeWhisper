@@ -1,35 +1,126 @@
 import asyncio
+from fractions import Fraction
 import ssl
-import numpy as np
 import base64
 from datetime import datetime
-from transcriber import SpeechTranscriber
+from av import AudioFrame
+import numpy as np
+import time
+import av
+import wave
+import io
 from aiohttp import web
+from aiohttp_cors import setup as setup_cors, ResourceOptions
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
 from aiortc.contrib.media import MediaRecorder, MediaPlayer
-from aiohttp_cors import setup as setup_cors, ResourceOptions
+from transcriber import SpeechTranscriber
 
-# Store active peer connections
-pcs = set()
+# Global set of active peer connections
+connections = set()
 
 def flush_callback(response):
-    # Convert the response into a wav and save it
+    # Save the decoded audio bytes to a WAV file
     audio_bytes = base64.b64decode(response["audio"])
-    file_name = f'response_{str(datetime.now().strftime("%Y-%m-%d %H-%M-%S"))}.wav'
-
-    # Write the decoded audio bytes to a file
+    file_name = f'response_{datetime.now().strftime("%Y-%m-%d %H-%M-%S")}.wav'
     with open(file_name, 'wb') as f:
         f.write(audio_bytes)
-
-    # Get ready to play the file on the RTC connections
-    player = MediaPlayer(file_name)
-
-    for pc in pcs:
-        casted_pc: RTCPeerConnection = pc
+    
+    # Create a MediaPlayer to play the response audio
+    for (_, reply_track) in connections:
+        casted_track: DynamicWavAudioTrack = reply_track
         print(f'Playing response: {response["response"]}')
-        casted_pc.addTrack(player.audio)
+        casted_track.enqueue_wav(audio_bytes)
 
 transcriber = SpeechTranscriber(flush_callback)
+
+class MediaStreamError(Exception):
+    pass
+
+class DynamicWavAudioTrack(MediaStreamTrack):
+    kind = "audio"
+
+    def __init__(self, sample_rate=44100, channels=2, sample_width=2, frame_duration=0.02):
+        super().__init__()
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.sample_width = sample_width
+        self.frame_duration = frame_duration
+        self.start_time = time.time()
+        self.queue = asyncio.Queue()  # Queue to hold WAV file bytes
+        self.current_wav = None
+
+    async def enqueue_wav(self, wav_bytes: bytes):
+        # Call this method to add new WAV file bytes to the track
+        await self.queue.put(wav_bytes)
+
+    async def recv(self):
+        print('recv')
+        # If no WAV file is currently playing, try to load one from the queue
+        if self.current_wav is None:
+            if not self.queue.empty():
+                wav_bytes = await self.queue.get()
+                self.current_wav = wave.open(io.BytesIO(wav_bytes), 'rb')
+                # Update track properties based on the WAV file
+                self.sample_rate = self.current_wav.getframerate()
+                self.channels = self.current_wav.getnchannels()
+                self.sample_width = self.current_wav.getsampwidth()
+            else:
+                # No WAV data available; output silence
+                return await self._create_silence_frame()
+        
+        # Read a chunk corresponding to frame_duration
+        num_frames = int(self.sample_rate * self.frame_duration)
+        raw_data = self.current_wav.readframes(num_frames)
+        if not raw_data:
+            # Finished current WAV file; clear it so next call can load a new one
+            self.current_wav = None
+            return await self._create_silence_frame()
+        
+        # Convert raw bytes into a numpy array for audio frame creation
+        dtype = np.int16 if self.sample_width == 2 else np.int32
+        audio_array = np.frombuffer(raw_data, dtype=dtype)
+        audio_array = audio_array.reshape(-1, self.channels)
+        
+        fmt = 's16' if self.sample_width == 2 else 's32'
+        layout = 'stereo' if self.channels == 2 else 'mono'
+        frame = av.AudioFrame.from_ndarray(
+            np.ascontiguousarray(audio_array.T), format=fmt, layout=layout
+        )
+        frame.sample_rate = self.sample_rate
+        elapsed = time.time() - self.start_time
+        frame.pts = int(elapsed * self.sample_rate)
+        frame.time_base = Fraction(1 / self.sample_rate)
+        
+        return frame
+
+    async def _create_silence_frame(self):
+        """
+        Receive the next :class:`~av.audio.frame.AudioFrame`.
+
+        The base implementation just reads silence, subclass
+        :class:`AudioStreamTrack` to provide a useful implementation.
+        """
+        if self.readyState != "live":
+            raise MediaStreamError
+
+        sample_rate = 8000
+        samples = int(self.frame_duration * sample_rate)
+
+        if hasattr(self, "_timestamp"):
+            self._timestamp += samples
+            wait = self._start + (self._timestamp / sample_rate) - time.time()
+            await asyncio.sleep(wait)
+        else:
+            self._start = time.time()
+            self._timestamp = 0
+
+        frame = AudioFrame(format="s16", layout="mono", samples=samples)
+        for p in frame.planes:
+            p.update(bytes(p.buffer_size))
+        frame.pts = self._timestamp
+        frame.sample_rate = sample_rate
+        frame.time_base = Fraction(1, sample_rate)
+        return frame
 
 class TranscribingAudioTrack(MediaStreamTrack):
     kind = "audio"
@@ -44,145 +135,123 @@ class TranscribingAudioTrack(MediaStreamTrack):
         transcriber.add_audio_frame(pcm_bytes)
         return frame
 
-    def frame_to_pcm(self, frame):
-        """ Extract PCM bytes from an AudioFrame and ensure correct sample rate """
-        # ✅ Ensure sample format is 16-bit PCM
+    def frame_to_pcm(self, frame: AudioFrame):
+        """Extract PCM bytes from an audio frame and resample to 16000Hz if needed."""
         pcm_bytes = frame.planes[0]
-
-        # ✅ Check sample rate (WebRTC usually sends 48000Hz, but verify)
-        # I have found this to lie -Moon
         if frame.sample_rate != 16000:
-            # print(f"🔄 Resampling from {frame.sample_rate}Hz to 48000Hz...")
             pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16)
-
-            # ✅ Resample to 48000Hz using NumPy (simple nearest-neighbor method)
+            # Compute the resampling factor based on the input sample rate
+            factor = 16000 / 96000 # it should be frame.sample_rate, but for my current implementation, I've found that it lies
+            new_length = int(len(pcm_array) * factor)
             resampled_array = np.interp(
-                np.linspace(0, len(pcm_array), int(len(pcm_array) * (16000 / 96000))),
+                np.linspace(0, len(pcm_array), new_length, endpoint=False),
                 np.arange(len(pcm_array)),
                 pcm_array
             ).astype(np.int16)
-
             return resampled_array.tobytes()
-
         return pcm_bytes
 
 async def offer(request):
-    global pcs  # Keep track of connections
-
     data = await request.json()
-    pc = RTCPeerConnection()  # ✅ Create a NEW WebRTC connection per client
-    pcs.add(pc)  # Store connection
+    pc = RTCPeerConnection()
+    reply_track = DynamicWavAudioTrack()
 
-    # Handle incoming tracks
+    connections.add((pc, reply_track))
+    pc.addTrack(reply_track)
+    # pc.addTrack(MediaPlayer('response_2025-02-23 02-42-12.wav').audio)
+
     @pc.on("track")
     async def on_track(track):
-        print(f"🎧 Received track: {track.kind}")  # ✅ Debug received track
-
+        print(f"🎧 Received track: {track.kind}")
         if track.kind == "audio":
-            print("🎙️ Audio track received! Starting processing...")
-            recorder = MediaRecorder(f"output_{id(pc)}.wav")  # Save per connection
+            print("🎙️ Audio track received. Starting processing...")
+            recorder = MediaRecorder(f"output_{id(pc)}.wav")
             recorder.addTrack(TranscribingAudioTrack(track))
             await recorder.start()
 
-    # Handle disconnections (Cleanup)
     @pc.on("connectionstatechange")
     def on_connection_state_change():
         if pc.connectionState in ["closed", "failed", "disconnected"]:
             print(f"🔴 Connection {id(pc)} closed. Cleaning up.")
-            pcs.discard(pc)
-    
-    offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
+            connections.discard((pc, reply_track))
+
+    offer_desc = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
+
     print("✅ Received WebRTC offer, sending answer.")
-    
-    await pc.setRemoteDescription(offer)
+    await pc.setRemoteDescription(offer_desc)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
-
+    
     print("📡 Sending WebRTC answer.")
-
     return web.json_response({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
 
 async def ice_candidate(request):
     data = await request.json()
-    print("🌍 Received ICE candidate:", data)  # ✅ Debug ICE candidates
-
-    # Ensure the data is correctly structured
+    print("🌍 Received ICE candidate:", data)
     if "candidate" in data:
         candidate = RTCIceCandidate(
-            component=1,  # Usually 1 for RTP/RTCP
-            foundation="0",  # A default value
-            priority=1,  # Default priority
-            protocol="udp",  # Use UDP
-            type="host",  # Default type
-            ip=data["candidate"],  # The actual ICE candidate string
-            port=5000,  # The default port (change if needed)
+            component=1,
+            foundation="0",
+            priority=1,
+            protocol="udp",
+            type="host",
+            ip=data["candidate"],
+            port=5000,
             sdpMid=data["sdpMid"],
             sdpMLineIndex=data["sdpMLineIndex"]
         )
-
-        # Apply ICE candidates to the most recent peer connection
-        if pcs:
-            pc = list(pcs)[-1]  # Use the last created connection
+        if connections:
+            # Use the last created connection
+            (pc, _) = list(connections)[-1]
             await pc.addIceCandidate(candidate)
-
     return web.Response()
 
 async def cleanup():
-    """ Periodically clean up old connections """
+    """Periodically remove inactive peer connections."""
     while True:
         await asyncio.sleep(10)
-        for pc in list(pcs):
+        for (pc, reply_track) in list(connections):
             if pc.connectionState in ["closed", "failed", "disconnected"]:
-                print(f"🗑️ Cleaning up connection {id(pc)}")
-                pcs.discard(pc)
-
-app = web.Application()
-
-# Enable CORS for all routes
-cors = setup_cors(app, defaults={
-    "*": ResourceOptions(
-        allow_credentials=True,
-        expose_headers="*",
-        allow_headers="*",
-        allow_methods=["POST", "GET", "OPTIONS"],
-    )
-})
-
-app.router.add_post("/offer", offer)
-app.router.add_post("/ice-candidate", ice_candidate)
-
-# Apply CORS to all routes
-for route in list(app.router.routes()):
-    cors.add(route)
+                print(f"Cleaning up connection {id(pc)}")
+                connections.discard((pc, reply_track))
 
 async def start_server():
-    """ Starts the WebRTC server and cleanup task """
-    # Start cleanup in background
-    asyncio.create_task(cleanup())  # ✅ Use create_task() instead of ensure_future()
+    # Start the cleanup task in the background
+    asyncio.create_task(cleanup())
 
-    # Load SSL certificate & key
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ssl_context.load_cert_chain(certfile="cert1.pem", keyfile="privkey1.pem")
+
+    app = web.Application()
+    cors = setup_cors(app, defaults={
+        "*": ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+            allow_methods=["POST", "GET", "OPTIONS"],
+        )
+    })
+
+    app.router.add_post("/offer", offer)
+    app.router.add_post("/ice-candidate", ice_candidate)
+    for route in list(app.router.routes()):
+        cors.add(route)
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, port=5000, ssl_context=ssl_context)
-    print("🚀 WebRTC server is running on HTTPS!")
+    print("WebRTC server is running on HTTPS!")
     await site.start()
 
     transcriber.start_processing()
 
-    running = True
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        transcriber.stop_processing()
+        await runner.shutdown()
+        await runner.cleanup()
 
-    # ✅ Keep the event loop alive
-    while running:
-        try:
-            await asyncio.sleep(3600)  # Sleep indefinitely to keep server running
-        except (KeyboardInterrupt, asyncio.exceptions.CancelledError):
-            transcriber.stop_processing()
-            await runner.shutdown()
-            await runner.cleanup()
-            running = False
-
-# ✅ Properly start asyncio event loop
-asyncio.run(start_server())
+if __name__ == "__main__":
+    asyncio.run(start_server())
