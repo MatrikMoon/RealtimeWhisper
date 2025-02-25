@@ -1,5 +1,6 @@
 import asyncio
 from fractions import Fraction
+from queue import Queue
 import ssl
 import base64
 from datetime import datetime
@@ -30,6 +31,7 @@ def flush_callback(response):
         casted_track: DynamicWavAudioTrack = reply_track
         print(f'Playing response: {response["response"]}')
         casted_track.enqueue_wav(audio_bytes)
+        # casted_track.enqueue_wav(MediaPlayer(file_name).audio)
 
 transcriber = SpeechTranscriber(flush_callback)
 
@@ -39,28 +41,31 @@ class MediaStreamError(Exception):
 class DynamicWavAudioTrack(MediaStreamTrack):
     kind = "audio"
 
-    def __init__(self, sample_rate=44100, channels=2, sample_width=2, frame_duration=0.02):
+    def __init__(self, sample_rate=48000, channels=2, sample_width=2, frame_duration=0.02):
         super().__init__()
         self.sample_rate = sample_rate
         self.channels = channels
         self.sample_width = sample_width
         self.frame_duration = frame_duration
         self.start_time = time.time()
-        self.queue = asyncio.Queue()  # Queue to hold WAV file bytes
+        self.queue = Queue()  # Queue to hold WAV file bytes
         self.current_wav = None
+        self.timestamp = 0
 
-    async def enqueue_wav(self, wav_bytes: bytes):
+    def enqueue_wav(self, wav_bytes: bytes):
         # Call this method to add new WAV file bytes to the track
-        await self.queue.put(wav_bytes)
+        self.queue.put(wav_bytes)
+
+    def enqueue_wav_bytes(self, wav_bytes: bytes):
+        # Call this method to add new WAV file bytes to the track
+        self.queue.put(wav_bytes)
 
     async def recv(self):
-        print('recv')
         # If no WAV file is currently playing, try to load one from the queue
         if self.current_wav is None:
             if not self.queue.empty():
-                wav_bytes = await self.queue.get()
+                wav_bytes = self.queue.get()
                 self.current_wav = wave.open(io.BytesIO(wav_bytes), 'rb')
-                # Update track properties based on the WAV file
                 self.sample_rate = self.current_wav.getframerate()
                 self.channels = self.current_wav.getnchannels()
                 self.sample_width = self.current_wav.getsampwidth()
@@ -69,28 +74,32 @@ class DynamicWavAudioTrack(MediaStreamTrack):
                 return await self._create_silence_frame()
         
         # Read a chunk corresponding to frame_duration
-        num_frames = int(self.sample_rate * self.frame_duration)
-        raw_data = self.current_wav.readframes(num_frames)
+        num_samples = int(self.sample_rate * self.frame_duration)
+        raw_data = self.current_wav.readframes(num_samples)
         if not raw_data:
             # Finished current WAV file; clear it so next call can load a new one
             self.current_wav = None
             return await self._create_silence_frame()
         
-        # Convert raw bytes into a numpy array for audio frame creation
-        dtype = np.int16 if self.sample_width == 2 else np.int32
-        audio_array = np.frombuffer(raw_data, dtype=dtype)
-        audio_array = audio_array.reshape(-1, self.channels)
-        
-        fmt = 's16' if self.sample_width == 2 else 's32'
-        layout = 'stereo' if self.channels == 2 else 'mono'
-        frame = av.AudioFrame.from_ndarray(
-            np.ascontiguousarray(audio_array.T), format=fmt, layout=layout
-        )
-        frame.sample_rate = self.sample_rate
-        elapsed = time.time() - self.start_time
-        frame.pts = int(elapsed * self.sample_rate)
-        frame.time_base = Fraction(1 / self.sample_rate)
-        
+        try:
+            self.timestamp += num_samples
+            fmt = 's16' if self.sample_width == 2 else 's32'
+            layout = 'stereo' if self.channels == 2 else 'mono'
+            frame = AudioFrame(format=fmt, layout=layout, samples=num_samples)
+            for p in frame.planes:
+                p.update(raw_data)
+
+            frame.sample_rate = self.sample_rate
+            frame.pts = self.timestamp
+            frame.time_base = Fraction(1, self.sample_rate)
+
+            wait = self.start_time + (self.timestamp / self.sample_rate) - time.time()
+            # print(f'{wait}  \t---  {self.start_time}\t{frame.pts}\t{self.sample_rate}')
+            await asyncio.sleep(wait)
+        except Exception as e:
+            print(e)
+
+        # print('fram')
         return frame
 
     async def _create_silence_frame(self):
@@ -103,23 +112,19 @@ class DynamicWavAudioTrack(MediaStreamTrack):
         if self.readyState != "live":
             raise MediaStreamError
 
-        sample_rate = 8000
-        samples = int(self.frame_duration * sample_rate)
+        samples = int(self.frame_duration * self.sample_rate)
 
-        if hasattr(self, "_timestamp"):
-            self._timestamp += samples
-            wait = self._start + (self._timestamp / sample_rate) - time.time()
-            await asyncio.sleep(wait)
-        else:
-            self._start = time.time()
-            self._timestamp = 0
+        self.timestamp += samples
+        wait = self.start_time + (self.timestamp / self.sample_rate) - time.time()
+        # print(f'{wait}  \t---  {self.start_time}\t{self.timestamp}\t{self.sample_rate}')
+        await asyncio.sleep(wait)
 
         frame = AudioFrame(format="s16", layout="mono", samples=samples)
         for p in frame.planes:
             p.update(bytes(p.buffer_size))
-        frame.pts = self._timestamp
-        frame.sample_rate = sample_rate
-        frame.time_base = Fraction(1, sample_rate)
+        frame.pts = self.timestamp
+        frame.sample_rate = self.sample_rate
+        frame.time_base = Fraction(1, self.sample_rate)
         return frame
 
 class TranscribingAudioTrack(MediaStreamTrack):
@@ -165,9 +170,16 @@ async def offer(request):
         print(f"🎧 Received track: {track.kind}")
         if track.kind == "audio":
             print("🎙️ Audio track received. Starting processing...")
-            recorder = MediaRecorder(f"output_{id(pc)}.wav")
-            recorder.addTrack(TranscribingAudioTrack(track))
-            await recorder.start()
+            # recorder = MediaRecorder(f"output_{id(pc)}.wav")
+            # recorder.addTrack(TranscribingAudioTrack(track))
+            # await recorder.start()
+
+            transcribing_track = TranscribingAudioTrack(track)
+            try:
+                while True:
+                    await transcribing_track.recv()
+            except Exception as e:
+                print("Audio processing ended:", e)
 
     @pc.on("connectionstatechange")
     def on_connection_state_change():

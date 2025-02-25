@@ -1,4 +1,3 @@
-import os
 import numpy as np
 import speech_recognition as sr
 import torch
