@@ -12,14 +12,14 @@ from queue import Queue
 from time import sleep
 
 # Audio Config
-FORMAT = pyaudio.paInt16
-CHANNELS = 1
-RATE = 16000
-CHUNK = 1
+# FORMAT = pyaudio.paInt16
+# CHANNELS = 1
+# RATE = 16000
+# CHUNK = 1
 
 # Initialize PyAudio
-audio = pyaudio.PyAudio()
-stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
+# audio = pyaudio.PyAudio()
+# stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
 
 class StreamingAudioSource(sr.AudioSource):
     def __init__(self, frame_queue, rate=16000, channels=1, sample_width=2):

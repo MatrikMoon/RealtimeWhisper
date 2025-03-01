@@ -163,7 +163,6 @@ async def offer(request):
 
     connections.add((pc, reply_track))
     pc.addTrack(reply_track)
-    # pc.addTrack(MediaPlayer('response_2025-02-23 02-42-12.wav').audio)
 
     @pc.on("track")
     async def on_track(track):

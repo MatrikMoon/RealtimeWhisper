@@ -5,3 +5,8 @@ SpeechRecognition
 torch
 numpy
 git+https://github.com/openai/whisper.git
+av
+aiohttp
+aiohttp_cors
+aiortc
+httpx
