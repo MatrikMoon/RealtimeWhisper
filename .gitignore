@@ -1,2 +1,7 @@
 *.pem
 *.wav
+
+**/__pycache__/
+**/.DS_Store
+**/._*
+**/.ipynb_checkpoints/

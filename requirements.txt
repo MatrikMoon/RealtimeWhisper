@@ -1,8 +1,10 @@
 setuptools
 pyaudio
 SpeechRecognition
---extra-index-url https://download.pytorch.org/whl/cu116
+--extra-index-url https://download.pytorch.org/whl/cu126
 torch
+torchaudio
+torchinfo
 numpy
 git+https://github.com/openai/whisper.git
 av
@@ -10,3 +12,11 @@ aiohttp
 aiohttp_cors
 aiortc
 httpx
+yamlargparse
+soundfile
+librosa
+pydub
+pesq
+einops
+rotary-embedding-torch
+huggingface-hub
