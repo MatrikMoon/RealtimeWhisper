@@ -159,7 +159,7 @@ class SpeechModel:
 
     def _load_model(self, model, checkpoint_path, model_key=None):
         # Load the checkpoint file into memory (map_location ensures compatibility with different devices)
-        checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
+        checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage, weights_only=False)
         # Load the model's state dictionary (weights and biases) into the current model
         if model_key in checkpoint:
             pretrained_model = checkpoint[model_key]

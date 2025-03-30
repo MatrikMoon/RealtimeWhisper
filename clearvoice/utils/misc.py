@@ -71,7 +71,7 @@ def load_checkpoint(checkpoint_path, use_cuda):
     #if use_cuda:
     #    checkpoint = torch.load(checkpoint_path)  # Load using CUDA
     #else:
-    checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)  # Load to CPU
+    checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage, weights_only=False)  # Load to CPU
     return checkpoint
 
 def get_learning_rate(optimizer):
