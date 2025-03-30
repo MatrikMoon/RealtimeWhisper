@@ -20,3 +20,4 @@ pesq
 einops
 rotary-embedding-torch
 huggingface-hub
+speechbrain==1.0.2

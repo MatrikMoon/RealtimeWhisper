@@ -302,23 +302,35 @@ class SpeechModel:
 
     def process_wav_bytes_directly_se(self, wav_bytes):
         with torch.no_grad():
+            did16 = False
+            MAX_WAV_VALUE_16B = 32768.0
+            MAX_WAV_VALUE_32B = 2147483648.0
             self.data = {}
+
+            # Prepare the bytes so they're in the format the tensor needs
+            data = np.frombuffer(wav_bytes, dtype=np.int16)
+            if max(data) > MAX_WAV_VALUE_16B:
+                audio_np = data / MAX_WAV_VALUE_32B
+            else:
+                did16 = True
+                audio_np = data / MAX_WAV_VALUE_16B
+
+            audio_np = audio_np.astype(np.float32)
+
+            # Reshape the data to ensure it's in the format [1, data_length].
+            old_shape_0 = audio_np.shape[0]
+            audio_np = np.reshape(audio_np, [1, audio_np.shape[0]])
+
             # Store the input audio and metadata in self.data
-            self.data['audio'] = wav_bytes
-            # self.data['id'] = wav_id
-            # self.data['audio_len'] = input_len
-            # self.data.update(audio_info)
+            self.data['audio'] = [audio_np]
+            self.data['audio_len'] = audio_np.shape[1]
 
             # Perform the audio decoding/processing
             output_audios = self.decode()
 
-            # Perform audio renormalization
-            if not isinstance(output_audios, list):
-                if len(scalars) > 1:
-                    for i in range(len(scalars)):
-                        output_audios[:,i] = output_audios[:,i] * scalars[i]
-                else:
-                    output_audios = output_audios * scalars[0]
+            output_audios = np.reshape(output_audios, (old_shape_0,))
+            output_audios = output_audios * MAX_WAV_VALUE_16B if did16 else output_audios * MAX_WAV_VALUE_32B
+            output_audios = output_audios.astype(np.int16)
                 
             return output_audios
 

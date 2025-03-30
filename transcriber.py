@@ -10,16 +10,21 @@ import httpx
 from datetime import datetime, timedelta
 from queue import Queue
 from time import sleep
+from clearvoice.clearvoice import ClearVoice
 
-# Audio Config
+# # Audio Config
 # FORMAT = pyaudio.paInt16
 # CHANNELS = 1
 # RATE = 16000
 # CHUNK = 1
 
-# Initialize PyAudio
+# # Initialize PyAudio
 # audio = pyaudio.PyAudio()
 # stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
+
+print(torch.version.cuda)
+print(torch.version.__version__)
+print(torch.cuda.is_available())
 
 class StreamingAudioSource(sr.AudioSource):
     def __init__(self, frame_queue, rate=16000, channels=1, sample_width=2):
@@ -61,7 +66,7 @@ class StreamingAudioSource(sr.AudioSource):
                 return b''.join(frames)
 
 class SpeechTranscriber:
-    def __init__(self, flush_callback, model="medium.en", energy_threshold=300, record_timeout=3, phrase_timeout=4):
+    def __init__(self, flush_callback, model="medium.en", energy_threshold=200, record_timeout=3, phrase_timeout=4):
         self.model_name = model
         self.energy_threshold = energy_threshold
         self.record_timeout = record_timeout
@@ -71,6 +76,7 @@ class SpeechTranscriber:
         self.phrase_time = None
         self.needs_flush = False
         self.processed_data_queue = Queue()
+        self.clearvoice = ClearVoice(task='speech_enhancement', model_names=['MossFormerGAN_SE_16K'])
         self.data_queue = Queue()
         self.transcription = ['']
         self.running = False
@@ -94,10 +100,16 @@ class SpeechTranscriber:
             Threaded callback function to receive audio data when recordings finish.
             audio: An AudioData containing the recorded bytes.
             """
-            # Grab the raw bytes and push it into the thread safe queue.
+            # Grab the raw bytes, run noise suppression, and push the result into the thread safe queue.
             data = audio.get_raw_data()
-            self.processed_data_queue.put(data)
-            # stream.write(data)
+
+            # Enhance audio so it is only voice
+            suppressed = self.clearvoice.process_bytes(data)
+            found_voice, trimmed = trim_silence(suppressed)
+
+            if found_voice:
+                self.processed_data_queue.put(suppressed)
+                # stream.write(suppressed)
 
         # Create a background thread that will pass us raw audio bytes.
         # We could do this manually but SpeechRecognizer provides a nice helper.
@@ -180,27 +192,59 @@ class SpeechTranscriber:
 
     def flush(self, text: str):
         print(f"Flushing: {text}")
-        bot_host = "http://192.168.1.102:8080/processVoice"
-        payload = {
-            "prompt": text,
-            "userId": "moon323",
-        }
-        headers = {
-            "Accept": "*/*",
-            "Content-Type": "application/json",
-        }
-        with httpx.Client() as client:
-            response = client.post(bot_host, json=payload, headers=headers, timeout=360)
-            response.raise_for_status()
+        # bot_host = "http://192.168.1.102:8080/processVoice"
+        # payload = {
+        #     "prompt": text,
+        #     "userId": "moon323",
+        # }
+        # headers = {
+        #     "Accept": "*/*",
+        #     "Content-Type": "application/json",
+        # }
+        # with httpx.Client() as client:
+        #     response = client.post(bot_host, json=payload, headers=headers, timeout=360)
+        #     response.raise_for_status()
 
-            # If the bot decides not to respond, just move on with life
-            if response.status_code == 204:
-                return
+        #     # If the bot decides not to respond, just move on with life
+        #     if response.status_code == 204:
+        #         return
             
-            json = response.json()
-            self.flush_callback(json)
-            print(f'Response: {json["response"]}')
+        #     json = response.json()
+        #     self.flush_callback(json)
+        #     print(f'Response: {json["response"]}')
         # pyautogui.write("say " + text + "\n", interval=0.01)  # Simulates key presses
+
+def trim_silence(audio_np, sample_rate=16000, threshold=100, silence_duration_ms=800):
+    abs_audio = np.abs(audio_np)
+    is_loud = abs_audio > threshold
+    silence_samples = int((silence_duration_ms / 1000) * sample_rate)
+
+    silent_counter = 0
+    speech_indices = []
+    current_segment = []
+    has_loud = False  # Track if current_segment contains loud audio
+
+    for idx, loud in enumerate(is_loud):
+        if loud:
+            if silent_counter >= silence_samples and current_segment:
+                speech_indices.extend(current_segment)
+                current_segment = []
+            silent_counter = 0
+            current_segment.append(idx)
+            has_loud = True
+        else:
+            silent_counter += 1
+            if silent_counter < silence_samples:
+                current_segment.append(idx)
+
+    # Only add the final segment if it contains loud audio
+    if current_segment and has_loud:
+        speech_indices.extend(current_segment)
+
+    trimmed_audio = audio_np[speech_indices]
+    has_audio = trimmed_audio.size > 0
+
+    return has_audio, trimmed_audio
 
 if __name__ == "__main__":
     transcriber = SpeechTranscriber()

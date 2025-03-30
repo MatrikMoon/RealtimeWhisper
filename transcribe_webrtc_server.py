@@ -7,7 +7,6 @@ from datetime import datetime
 from av import AudioFrame
 import numpy as np
 import time
-import av
 import wave
 import io
 from aiohttp import web

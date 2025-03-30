@@ -1,4 +1,6 @@
 from clearvoice.network_wrapper import network_wrapper
+from clearvoice.networks import SpeechModel
+from typing import cast
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -46,6 +48,10 @@ class ClearVoice:
                 return results[model.name]
             else:
                 return results
+            
+    def process_bytes(self, wav_bytes):
+        for model in self.models:
+            return cast(SpeechModel, model).process_wav_bytes_directly_se(wav_bytes)
 
     def write(self, results, output_path):
         add_subdir = False
