@@ -192,26 +192,26 @@ class SpeechTranscriber:
 
     def flush(self, text: str):
         print(f"Flushing: {text}")
-        # bot_host = "http://192.168.1.102:8080/processVoice"
-        # payload = {
-        #     "prompt": text,
-        #     "userId": "moon323",
-        # }
-        # headers = {
-        #     "Accept": "*/*",
-        #     "Content-Type": "application/json",
-        # }
-        # with httpx.Client() as client:
-        #     response = client.post(bot_host, json=payload, headers=headers, timeout=360)
-        #     response.raise_for_status()
+        bot_host = "http://192.168.1.102:8080/processVoice"
+        payload = {
+            "prompt": text,
+            "userId": "moon323",
+        }
+        headers = {
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+        }
+        with httpx.Client() as client:
+            response = client.post(bot_host, json=payload, headers=headers, timeout=360)
+            response.raise_for_status()
 
-        #     # If the bot decides not to respond, just move on with life
-        #     if response.status_code == 204:
-        #         return
+            # If the bot decides not to respond, just move on with life
+            if response.status_code == 204:
+                return
             
-        #     json = response.json()
-        #     self.flush_callback(json)
-        #     print(f'Response: {json["response"]}')
+            json = response.json()
+            self.flush_callback(json)
+            print(f'Response: {json["response"]}')
         # pyautogui.write("say " + text + "\n", interval=0.01)  # Simulates key presses
 
 def trim_silence(audio_np, sample_rate=16000, threshold=100, silence_duration_ms=800):
