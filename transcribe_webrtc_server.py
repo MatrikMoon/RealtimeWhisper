@@ -25,10 +25,10 @@ from transcriber import SpeechTranscriber
 connections = set()
 
 
-def flush_callback(response):
+def flush_callback(transcribed_text):
     bot_host = "http://192.168.1.102:8080/processVoice"
     payload = {
-        "prompt": text,
+        "prompt": transcribed_text,
         "userId": "moon323",
     }
     headers = {

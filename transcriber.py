@@ -26,12 +26,12 @@ print(torch.version.__version__)
 print(torch.cuda.is_available())
 
 
-def save_to_wav(filename, audio_np, sample_rate=16000):
+def save_to_wav(filename, audio_bytes, sample_rate=16000):
     with wave.open(filename, "wb") as wav_file:
         wav_file.setnchannels(1)  # mono audio
         wav_file.setsampwidth(2)  # 16-bit audio
         wav_file.setframerate(sample_rate)
-        wav_file.writeframes(audio_np.tobytes())
+        wav_file.writeframes(audio_bytes)
 
 
 class StreamingAudioSource(sr.AudioSource):
@@ -89,14 +89,14 @@ class SpeechTranscriber:
         self.phrase_timeout = phrase_timeout
         self.flush_callback = flush_callback
 
-        self.phrase_time = None
+        self.last_phrase_time = None
         self.needs_flush = False
         self.processed_data_queue = Queue()
         self.clearvoice = ClearVoice(
             task="speech_enhancement", model_names=["MossFormerGAN_SE_16K"]
         )
         self.data_queue = Queue()
-        self.transcription = [""]
+        self.transcription = ""
         self.running = False
 
         # We use SpeechRecognizer to record our audio because it has a nice feature where it can detect when speech ends.
@@ -127,6 +127,7 @@ class SpeechTranscriber:
             found_voice, trimmed = trim_silence(suppressed)
 
             if found_voice:
+                print("dumping audio")
                 file_name = f'request_{datetime.now().strftime("%Y-%m-%d %H-%M-%S")}_original.wav'
                 save_to_wav(file_name, data)
                 file_name = f'request_{datetime.now().strftime("%Y-%m-%d %H-%M-%S")}_suppressed.wav'
@@ -163,20 +164,15 @@ class SpeechTranscriber:
             now = datetime.utcnow()
             if (
                 self.needs_flush
-                and self.phrase_time
-                and now - self.phrase_time > timedelta(seconds=self.phrase_timeout)
+                and self.last_phrase_time
+                and now - self.last_phrase_time > timedelta(seconds=self.phrase_timeout)
             ):
                 self.needs_flush = False
-                self.flush("\n".join(self.transcription))
-                self.transcription = [""]
+                self.flush(self.transcription)
+                self.transcription = ""
 
             if not self.processed_data_queue.empty():
-                phrase_complete = False
-                if self.phrase_time and now - self.phrase_time > timedelta(
-                    seconds=self.phrase_timeout
-                ):
-                    phrase_complete = True
-                self.phrase_time = now
+                self.last_phrase_time = now
 
                 audio_data = b"".join(self.processed_data_queue.queue)
                 self.processed_data_queue.queue.clear()
@@ -190,19 +186,8 @@ class SpeechTranscriber:
                 )
                 text = result["text"].strip()
 
-                if phrase_complete:
-                    # print('(pause)')
-                    self.transcription.append(text)
-                    self.needs_flush = True
-                else:
-                    # print('(no pause)')
-                    self.transcription[-1] += " " + text
-                    self.needs_flush = True
-
-                # os.system('cls' if os.name=='nt' else 'clear')
-                # for line in self.transcription:
-                #     print(line)
-                # print('', end='', flush=True)
+                self.transcription += " " + text
+                self.needs_flush = True
             else:
                 sleep(0.25)
 
