@@ -9,38 +9,70 @@ import numpy as np
 import time
 import wave
 import io
+import httpx
 from aiohttp import web
 from aiohttp_cors import setup as setup_cors, ResourceOptions
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
+from aiortc import (
+    RTCPeerConnection,
+    RTCSessionDescription,
+    MediaStreamTrack,
+    RTCIceCandidate,
+)
 from aiortc.contrib.media import MediaRecorder, MediaPlayer
 from transcriber import SpeechTranscriber
 
 # Global set of active peer connections
 connections = set()
 
+
 def flush_callback(response):
-    # Save the decoded audio bytes to a WAV file
-    audio_bytes = base64.b64decode(response["audio"])
-    file_name = f'response_{datetime.now().strftime("%Y-%m-%d %H-%M-%S")}.wav'
-    with open(file_name, 'wb') as f:
-        f.write(audio_bytes)
-    
-    # Create a MediaPlayer to play the response audio
-    for (_, reply_track) in connections:
-        casted_track: DynamicWavAudioTrack = reply_track
-        print(f'Playing response: {response["response"]}')
-        casted_track.enqueue_wav(audio_bytes)
-        # casted_track.enqueue_wav(MediaPlayer(file_name).audio)
+    bot_host = "http://192.168.1.102:8080/processVoice"
+    payload = {
+        "prompt": text,
+        "userId": "moon323",
+    }
+    headers = {
+        "Accept": "*/*",
+        "Content-Type": "application/json",
+    }
+    with httpx.Client() as client:
+        response = client.post(bot_host, json=payload, headers=headers, timeout=360)
+        response.raise_for_status()
+
+        # If the bot decides not to respond, just move on with life
+        if response.status_code == 204:
+            return
+
+        json = response.json()
+        print(f'Response: {json["response"]}')
+
+        # Save the decoded audio bytes to a WAV file
+        audio_bytes = base64.b64decode(json["audio"])
+        file_name = f'response_{datetime.now().strftime("%Y-%m-%d %H-%M-%S")}.wav'
+        with open(file_name, "wb") as f:
+            f.write(audio_bytes)
+
+        # Create a MediaPlayer to play the response audio
+        for _, reply_track in connections:
+            casted_track: DynamicWavAudioTrack = reply_track
+            print(f'Playing response: {json["response"]}')
+            casted_track.enqueue_wav(audio_bytes)
+            # casted_track.enqueue_wav(MediaPlayer(file_name).audio)
+
 
 transcriber = SpeechTranscriber(flush_callback)
+
 
 class MediaStreamError(Exception):
     pass
 
+
 class DynamicWavAudioTrack(MediaStreamTrack):
     kind = "audio"
 
-    def __init__(self, sample_rate=48000, channels=2, sample_width=2, frame_duration=0.02):
+    def __init__(
+        self, sample_rate=48000, channels=2, sample_width=2, frame_duration=0.02
+    ):
         super().__init__()
         self.sample_rate = sample_rate
         self.channels = channels
@@ -64,14 +96,14 @@ class DynamicWavAudioTrack(MediaStreamTrack):
         if self.current_wav is None:
             if not self.queue.empty():
                 wav_bytes = self.queue.get()
-                self.current_wav = wave.open(io.BytesIO(wav_bytes), 'rb')
+                self.current_wav = wave.open(io.BytesIO(wav_bytes), "rb")
                 self.sample_rate = self.current_wav.getframerate()
                 self.channels = self.current_wav.getnchannels()
                 self.sample_width = self.current_wav.getsampwidth()
             else:
                 # No WAV data available; output silence
                 return await self._create_silence_frame()
-        
+
         # Read a chunk corresponding to frame_duration
         num_samples = int(self.sample_rate * self.frame_duration)
         raw_data = self.current_wav.readframes(num_samples)
@@ -79,11 +111,11 @@ class DynamicWavAudioTrack(MediaStreamTrack):
             # Finished current WAV file; clear it so next call can load a new one
             self.current_wav = None
             return await self._create_silence_frame()
-        
+
         try:
             self.timestamp += num_samples
-            fmt = 's16' if self.sample_width == 2 else 's32'
-            layout = 'stereo' if self.channels == 2 else 'mono'
+            fmt = "s16" if self.sample_width == 2 else "s32"
+            layout = "stereo" if self.channels == 2 else "mono"
             frame = AudioFrame(format=fmt, layout=layout, samples=num_samples)
             for p in frame.planes:
                 p.update(raw_data)
@@ -126,6 +158,7 @@ class DynamicWavAudioTrack(MediaStreamTrack):
         frame.time_base = Fraction(1, self.sample_rate)
         return frame
 
+
 class TranscribingAudioTrack(MediaStreamTrack):
     kind = "audio"
 
@@ -145,15 +178,18 @@ class TranscribingAudioTrack(MediaStreamTrack):
         if frame.sample_rate != 16000:
             pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16)
             # Compute the resampling factor based on the input sample rate
-            factor = 16000 / 96000 # it should be frame.sample_rate, but for my current implementation, I've found that it lies
+            factor = (
+                16000 / 96000
+            )  # it should be frame.sample_rate, but for my current implementation, I've found that it lies
             new_length = int(len(pcm_array) * factor)
             resampled_array = np.interp(
                 np.linspace(0, len(pcm_array), new_length, endpoint=False),
                 np.arange(len(pcm_array)),
-                pcm_array
+                pcm_array,
             ).astype(np.int16)
             return resampled_array.tobytes()
         return pcm_bytes
+
 
 async def offer(request):
     data = await request.json()
@@ -191,9 +227,12 @@ async def offer(request):
     await pc.setRemoteDescription(offer_desc)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
-    
+
     print("📡 Sending WebRTC answer.")
-    return web.json_response({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
+    return web.json_response(
+        {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+    )
+
 
 async def ice_candidate(request):
     data = await request.json()
@@ -208,7 +247,7 @@ async def ice_candidate(request):
             ip=data["candidate"],
             port=5000,
             sdpMid=data["sdpMid"],
-            sdpMLineIndex=data["sdpMLineIndex"]
+            sdpMLineIndex=data["sdpMLineIndex"],
         )
         if connections:
             # Use the last created connection
@@ -216,14 +255,16 @@ async def ice_candidate(request):
             await pc.addIceCandidate(candidate)
     return web.Response()
 
+
 async def cleanup():
     """Periodically remove inactive peer connections."""
     while True:
         await asyncio.sleep(10)
-        for (pc, reply_track) in list(connections):
+        for pc, reply_track in list(connections):
             if pc.connectionState in ["closed", "failed", "disconnected"]:
                 print(f"Cleaning up connection {id(pc)}")
                 connections.discard((pc, reply_track))
+
 
 async def start_server():
     # Start the cleanup task in the background
@@ -233,14 +274,17 @@ async def start_server():
     ssl_context.load_cert_chain(certfile="cert1.pem", keyfile="privkey1.pem")
 
     app = web.Application()
-    cors = setup_cors(app, defaults={
-        "*": ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*",
-            allow_methods=["POST", "GET", "OPTIONS"],
-        )
-    })
+    cors = setup_cors(
+        app,
+        defaults={
+            "*": ResourceOptions(
+                allow_credentials=True,
+                expose_headers="*",
+                allow_headers="*",
+                allow_methods=["POST", "GET", "OPTIONS"],
+            )
+        },
+    )
 
     app.router.add_post("/offer", offer)
     app.router.add_post("/ice-candidate", ice_candidate)
@@ -262,6 +306,7 @@ async def start_server():
         transcriber.stop_processing()
         await runner.shutdown()
         await runner.cleanup()
+
 
 if __name__ == "__main__":
     asyncio.run(start_server())
