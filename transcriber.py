@@ -80,7 +80,7 @@ class SpeechTranscriber:
     def __init__(
         self,
         flush_callback,
-        model="medium.en",
+        model="small.en",
         energy_threshold=200,
         record_timeout=2,
         phrase_timeout=4,
