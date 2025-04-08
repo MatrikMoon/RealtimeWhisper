@@ -15,7 +15,7 @@ from clearvoice.clearvoice import ClearVoice
 # FORMAT = pyaudio.paInt16
 # CHANNELS = 1
 # RATE = 16000
-# CHUNK = 1
+# CHUNK = 8192
 
 # # Initialize PyAudio
 # audio = pyaudio.PyAudio()
@@ -58,7 +58,10 @@ class StreamingAudioSource(sr.AudioSource):
             """Read from the queue, returning silence if no data is available."""
             with self.lock:
                 frames = []
-                remaining_size = size
+
+                # We're still slightly unclear on why the *2 is necessary, but it may have something to do with the sample
+                # originally being 96000 instaed of 48000?
+                remaining_size = size * 2
 
                 while not frames:
                     while remaining_size > 0:
@@ -77,9 +80,9 @@ class SpeechTranscriber:
     def __init__(
         self,
         flush_callback,
-        model="tiny.en",
+        model="medium.en",
         energy_threshold=200,
-        record_timeout=6,
+        record_timeout=2,
         phrase_timeout=4,
     ):
         self.model_name = model
@@ -87,9 +90,9 @@ class SpeechTranscriber:
         self.record_timeout = record_timeout
         self.phrase_timeout = phrase_timeout
         self.flush_callback = flush_callback
-        self.last_callback_print = 0
-        self.last_processing_print = 0
-        self.last_flush_print = 0
+        self.last_callback_print = datetime.utcnow()
+        self.last_processing_print = datetime.utcnow()
+        self.last_flush_print = datetime.utcnow()
 
         self.last_phrase_time = None
         self.needs_flush = False
@@ -113,9 +116,6 @@ class SpeechTranscriber:
         self.audio_model = whisper.load_model(self.model_name)
         print("Model loaded and ready to receive audio frames.")
 
-        # with source:
-        #     recorder.adjust_for_ambient_noise(source)
-
         def record_callback(_, audio: sr.AudioData) -> None:
             """
             Threaded callback function to receive audio data when recordings finish.
@@ -130,7 +130,7 @@ class SpeechTranscriber:
 
             if found_voice:
                 now = datetime.utcnow()
-                print("callback: ", now - self.last_callback_print)
+                # print("callback: ", now - self.last_callback_print)
                 self.last_callback_print = now
                 file_name = f'request_{datetime.now().strftime("%Y-%m-%d %H-%M-%S")}_original.wav'
                 save_to_wav(file_name, data)
@@ -160,7 +160,7 @@ class SpeechTranscriber:
                 and now - self.last_phrase_time > timedelta(seconds=self.phrase_timeout)
             ):
                 debug_now = datetime.utcnow()
-                print("flush: ", debug_now - self.last_flush_print)
+                # print("flush: ", debug_now - self.last_flush_print)
                 self.last_flush_print = debug_now
 
                 self.needs_flush = False
@@ -171,7 +171,7 @@ class SpeechTranscriber:
                 self.last_phrase_time = now
 
                 debug_now = datetime.utcnow()
-                print("whisper loop: ", debug_now - self.last_processing_print)
+                # print("whisper loop: ", debug_now - self.last_processing_print)
                 self.last_processing_print = debug_now
 
                 audio_data = b"".join(self.processed_data_queue.queue)
@@ -204,10 +204,6 @@ class SpeechTranscriber:
         self.running = False
         if self.thread.is_alive():
             self.thread.join()
-
-        print("\n\nTranscription:")
-        for line in self.transcription:
-            print(line)
 
         print("Processing stopped.")
 
@@ -248,10 +244,3 @@ def trim_silence(audio_np, sample_rate=16000, threshold=100, silence_duration_ms
     has_audio = trimmed_audio.size > 0
 
     return has_audio, trimmed_audio
-
-
-if __name__ == "__main__":
-    transcriber = SpeechTranscriber()
-    transcriber.start_processing()
-    input("Press Enter to stop...\n")
-    transcriber.stop_processing()
