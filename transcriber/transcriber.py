@@ -2,7 +2,6 @@ import numpy as np
 import speech_recognition as sr
 import torch
 import whisper
-import wave
 import threading
 import pyaudio
 import time
@@ -10,6 +9,8 @@ from datetime import datetime, timedelta
 from queue import Queue
 from time import sleep
 from clearvoice.clearvoice import ClearVoice
+from .utilities import save_to_wav, trim_silence
+from .streaming_audio_source import StreamingAudioSource
 
 # # Audio Config
 # FORMAT = pyaudio.paInt16
@@ -25,66 +26,18 @@ print(torch.version.cuda)
 print(torch.version.__version__)
 print(torch.cuda.is_available())
 
-def save_to_wav(filename, audio_bytes, sample_rate=16000):
-    with wave.open(filename, "wb") as wav_file:
-        wav_file.setnchannels(1)  # mono audio
-        wav_file.setsampwidth(2)  # 16-bit audio
-        wav_file.setframerate(sample_rate)
-        wav_file.writeframes(audio_bytes)
-
-
-class StreamingAudioSource(sr.AudioSource):
-    def __init__(self, frame_queue, rate=16000, channels=1, sample_width=2):
-        self.frame_queue = frame_queue
-        self.SAMPLE_RATE = rate
-        self.CHANNELS = channels
-        self.SAMPLE_WIDTH = sample_width  # 16-bit PCM
-        self.CHUNK = 8192
-        self.stream = self.AudioFrameStream(self.frame_queue, self.CHUNK)
-
-    def __enter__(self):
-        return self  # Allows using 'with' statements
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        pass  # No cleanup needed
-
-    class AudioFrameStream(object):
-        def __init__(self, frame_queue: Queue, chunk: int):
-            self.frame_queue = frame_queue
-            self.lock = threading.Lock()
-            self.CHUNK = chunk
-
-        def read(self, size):
-            """Read from the queue, returning silence if no data is available."""
-            with self.lock:
-                frames = []
-
-                # We're still slightly unclear on why the *2 is necessary, but it may have something to do with the sample
-                # originally being 96000 instaed of 48000?
-                remaining_size = size * 2
-
-                while not frames:
-                    while remaining_size > 0:
-                        if self.frame_queue.empty():
-                            time.sleep(0.1)
-
-                        chunk = self.frame_queue.get()
-                        # print(f'Rame queue: {self.frame_queue.qsize()} {size} {remaining_size} {len(chunk)}')
-                        frames.append(chunk)
-                        remaining_size -= len(chunk)
-
-                return b"".join(frames)
-
 
 class SpeechTranscriber:
     def __init__(
         self,
+        username,
         flush_callback,
         model="small.en",
         energy_threshold=200,
-        record_timeout=2,
-        phrase_timeout=4,
+        record_timeout=3,
+        phrase_timeout=5,
     ):
+        self.username = username
         self.model_name = model
         self.energy_threshold = energy_threshold
         self.record_timeout = record_timeout
@@ -178,7 +131,8 @@ class SpeechTranscriber:
                 self.processed_data_queue.queue.clear()
 
                 audio_np = (
-                    np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+                    np.frombuffer(audio_data, dtype=np.int16).astype(
+                        np.float32)
                     / 32768.0
                 )
                 result = self.audio_model.transcribe(
@@ -195,7 +149,8 @@ class SpeechTranscriber:
         """Starts audio processing in a separate thread."""
         if not self.running:
             self.running = True
-            self.thread = threading.Thread(target=self.process_audio, daemon=True)
+            self.thread = threading.Thread(
+                target=self.process_audio, daemon=True)
             self.thread.start()
             print("Processing started in background thread.")
 
@@ -209,38 +164,5 @@ class SpeechTranscriber:
 
     def flush(self, text: str):
         print(f"Flushing: {text}")
-        self.flush_callback(text)
+        self.flush_callback(self.username, text)
         # pyautogui.write("say " + text + "\n", interval=0.01)  # Simulates key presses
-
-
-def trim_silence(audio_np, sample_rate=16000, threshold=100, silence_duration_ms=800):
-    abs_audio = np.abs(audio_np)
-    is_loud = abs_audio > threshold
-    silence_samples = int((silence_duration_ms / 1000) * sample_rate)
-
-    silent_counter = 0
-    speech_indices = []
-    current_segment = []
-    has_loud = False  # Track if current_segment contains loud audio
-
-    for idx, loud in enumerate(is_loud):
-        if loud:
-            if silent_counter >= silence_samples and current_segment:
-                speech_indices.extend(current_segment)
-                current_segment = []
-            silent_counter = 0
-            current_segment.append(idx)
-            has_loud = True
-        else:
-            silent_counter += 1
-            if silent_counter < silence_samples:
-                current_segment.append(idx)
-
-    # Only add the final segment if it contains loud audio
-    if current_segment and has_loud:
-        speech_indices.extend(current_segment)
-
-    trimmed_audio = audio_np[speech_indices]
-    has_audio = trimmed_audio.size > 0
-
-    return has_audio, trimmed_audio
