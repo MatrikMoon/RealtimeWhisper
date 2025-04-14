@@ -4,7 +4,6 @@ import torch
 import whisper
 import threading
 import pyaudio
-import time
 from datetime import datetime, timedelta
 from queue import Queue
 from time import sleep
@@ -20,7 +19,8 @@ from .streaming_audio_source import StreamingAudioSource
 
 # # Initialize PyAudio
 # audio = pyaudio.PyAudio()
-# stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK)
+# stream = audio.open(format=FORMAT, channels=CHANNELS,
+# rate=RATE, output=True, frames_per_buffer=CHUNK)
 
 print(torch.version.cuda)
 print(torch.version.__version__)
@@ -31,6 +31,9 @@ class SpeechTranscriber:
     def __init__(
         self,
         username,
+        personality,
+        gender,
+        sourcematerial,
         flush_callback,
         model="small.en",
         energy_threshold=200,
@@ -38,6 +41,9 @@ class SpeechTranscriber:
         phrase_timeout=5,
     ):
         self.username = username
+        self.personality = personality
+        self.gender = gender
+        self.sourcematerial = sourcematerial
         self.model_name = model
         self.energy_threshold = energy_threshold
         self.record_timeout = record_timeout
@@ -92,7 +98,7 @@ class SpeechTranscriber:
                 file_name = f'request_{datetime.now().strftime("%Y-%m-%d %H-%M-%S")}_trimmed.wav'
                 save_to_wav(file_name, trimmed)
                 self.processed_data_queue.put(suppressed)
-                # stream.write(suppressed)
+                # stream.write(data)
 
         # Create a background thread that will pass us raw audio bytes.
         # We could do this manually but SpeechRecognizer provides a nice helper.
@@ -164,5 +170,6 @@ class SpeechTranscriber:
 
     def flush(self, text: str):
         print(f"Flushing: {text}")
-        self.flush_callback(self.username, text)
+        self.flush_callback(self.username, self.personality,
+                            self.gender, self.sourcematerial, text)
         # pyautogui.write("say " + text + "\n", interval=0.01)  # Simulates key presses

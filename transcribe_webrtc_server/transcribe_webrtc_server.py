@@ -1,4 +1,5 @@
 import asyncio
+import re
 import ssl
 import base64
 from datetime import datetime
@@ -22,11 +23,14 @@ class TranscribeWebRTCServer:
         super().__init__()
         self.connections: list[Connection] = []
 
-    def flush_callback(self, username, transcribed_text):
+    def flush_callback(self, username, personality, gender, source_material, transcribed_text):
         bot_host = "http://192.168.1.102:8080/processVoice"
         payload = {
             "prompt": transcribed_text,
             "userId": username,
+            "personality": personality,
+            "gender": gender,
+            "sourceMaterial": source_material
         }
         headers = {
             "Accept": "*/*",
@@ -103,10 +107,15 @@ class TranscribeWebRTCServer:
 
             @channel.on("message")
             def on_message(message):
+                def extract_fields(s):
+                    pattern = r'([A-Z]+)>(.*?)(?=[A-Z]+>|$)'
+                    return {key: value.strip() for key, value in re.findall(pattern, s)}
+
                 if isinstance(message, str) and message.startswith("NAME>"):
-                    found.name = message[5:]
+                    fields = extract_fields(message)
+                    found.name = fields["NAME"]
                     found.transcriber = SpeechTranscriber(
-                        found.name, self.flush_callback)
+                        found.name, fields["PERSONALITY"], fields["GENDER"], fields["SOURCEMATERIAL"], self.flush_callback)
                     found.transcriber.start_processing()
                     channel.send("<TRANSCRIBERWARMEDUP>")
 

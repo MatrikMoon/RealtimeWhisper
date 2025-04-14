@@ -3,8 +3,20 @@ import numpy as np
 from aiortc import (
     MediaStreamTrack,
 )
+# import pyaudio
 
 from transcriber.transcriber import SpeechTranscriber
+
+# # Audio Config
+# FORMAT = pyaudio.paInt16
+# CHANNELS = 1
+# RATE = 16000
+# CHUNK = 8192
+
+# # Initialize PyAudio
+# audio = pyaudio.PyAudio()
+# stream = audio.open(format=FORMAT, channels=CHANNELS,
+#                     rate=RATE, output=True, frames_per_buffer=CHUNK)
 
 
 class TranscribingAudioTrack(MediaStreamTrack):
@@ -18,6 +30,7 @@ class TranscribingAudioTrack(MediaStreamTrack):
     async def recv(self):
         frame = await self.track.recv()
         pcm_bytes = self.frame_to_pcm(frame)
+        # stream.write(pcm_bytes)
         self.transcriber.add_audio_frame(pcm_bytes)
         return frame
 
