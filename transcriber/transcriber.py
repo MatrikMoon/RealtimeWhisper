@@ -1,3 +1,4 @@
+import gc
 import numpy as np
 import speech_recognition as sr
 import torch
@@ -165,6 +166,12 @@ class SpeechTranscriber:
         self.running = False
         if self.thread.is_alive():
             self.thread.join()
+
+        # TODO: Not sure this works?
+        del self.audio_model
+        self.audio_model = None
+        gc.collect()
+        torch.cuda.empty_cache()
 
         print("Processing stopped.")
 
