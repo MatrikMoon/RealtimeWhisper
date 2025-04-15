@@ -1,8 +1,18 @@
 import numpy as np
 import wave
+import audioop
 
 
-def trim_silence(audio_np, sample_rate=16000, threshold=100, silence_duration_ms=800):
+def detect_noise(audio_bytes: bytes, sample_width=2, threshold=400, debug=False):
+    energy = audioop.rms(audio_bytes, sample_width)
+
+    if debug:
+        print(energy, energy > threshold)
+
+    return energy > threshold
+
+
+def trim_silence(audio_np: np.ndarray, sample_rate=16000, threshold=100, silence_duration_ms=800):
     abs_audio = np.abs(audio_np)
     is_loud = abs_audio > threshold
     silence_samples = int((silence_duration_ms / 1000) * sample_rate)

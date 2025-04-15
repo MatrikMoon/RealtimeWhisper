@@ -34,14 +34,11 @@ class DynamicWavAudioTrack(MediaStreamTrack):
         # Call this method to add new WAV file bytes to the track
         self.queue.put(wav_bytes)
 
-    def enqueue_wav_bytes(self, wav_bytes: bytes):
-        # Call this method to add new WAV file bytes to the track
-        self.queue.put(wav_bytes)
-
     async def recv(self):
         # If no WAV file is currently playing, try to load one from the queue
         if self.current_wav is None:
             if not self.queue.empty():
+                print("Playing queued data")
                 wav_bytes = self.queue.get()
                 self.current_wav = wave.open(io.BytesIO(wav_bytes), "rb")
                 self.sample_rate = self.current_wav.getframerate()
