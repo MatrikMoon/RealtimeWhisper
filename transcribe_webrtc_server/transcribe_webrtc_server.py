@@ -16,6 +16,7 @@ from .dynamic_wav_audio_track import DynamicWavAudioTrack
 from .transcribing_audio_track import TranscribingAudioTrack
 from .connection import Connection
 from transcriber.transcriber import SpeechTranscriber
+import json as jsonlib
 
 
 class TranscribeWebRTCServer:
@@ -36,34 +37,66 @@ class TranscribeWebRTCServer:
             "Accept": "*/*",
             "Content-Type": "application/json",
         }
-        with httpx.Client() as client:
-            response = client.post(bot_host, json=payload,
-                                   headers=headers, timeout=360)
-            response.raise_for_status()
 
-            # If the bot decides not to respond, just move on with life
-            if response.status_code == 204:
-                return
+        with httpx.Client(timeout=360) as client:
+            with client.stream("POST", bot_host, json=payload, headers=headers) as response:
+                response.raise_for_status()
 
-            json = response.json()
-            print(f'Response: {json["response"]}')
+                if response.status_code == 204:
+                    return
 
-            # Save the decoded audio bytes to a WAV file
-            audio_bytes = base64.b64decode(json["audio"])
-            file_name = f'response_{datetime.now().strftime("%Y-%m-%d %H-%M-%S")}.wav'
-            with open(file_name, "wb") as f:
-                f.write(audio_bytes)
+                buffer = ""
 
-            # Create a MediaPlayer to play the response audio
-            for connection in self.connections:
-                print(f'Playing response for {connection.name}')
-                connection.reply_track.enqueue_wav(audio_bytes)
+                first_chunk = True
 
-                self.loop.call_soon_threadsafe(
-                    connection.data_channel.send, "FROMUSER>" + json["respondingTo"])
-                self.loop.call_soon_threadsafe(
-                    connection.data_channel.send, "FROMBOT>" + json["response"] + "AUDIO>" + json["audio"])
-                # connection.reply_track.enqueue_wav(MediaPlayer(file_name).audio)
+                for chunk in response.iter_text():
+                    if not chunk:
+                        continue
+
+                    buffer += chunk
+                    parts = buffer.split("\n")
+                    buffer = parts.pop() if parts else ""
+
+                    for part in parts:
+                        try:
+                            obj = jsonlib.loads(part)
+                        except jsonlib.JSONDecodeError as e:
+                            # print("❌ Failed to parse JSON part:", part)
+                            continue
+
+                        # print(f"✅ Got JSON object: {obj['response']}")
+
+                        # Save audio to WAV
+                        if "audio" in obj:
+                            audio_bytes = base64.b64decode(obj["audio"])
+                            file_name = f'response_{datetime.now().strftime("%Y-%m-%d %H-%M-%S")}.wav'
+                            with open(file_name, "wb") as f:
+                                f.write(audio_bytes)
+
+                        for connection in self.connections:
+                            if "audio" in obj:
+                                print(
+                                    f'🎧 Playing response chunk for {connection.name}')
+                                connection.reply_track.enqueue_wav(audio_bytes)
+
+                            if first_chunk:
+                                first_chunk = False
+                                self.loop.call_soon_threadsafe(
+                                    connection.data_channel.send, "FROMUSER>" + obj["respondingTo"])
+                                if "audio" in obj:
+                                    self.loop.call_soon_threadsafe(
+                                        connection.data_channel.send, "FROMBOT>" + obj["response"] + "AUDIO>" + obj["audio"])
+                                else:
+                                    self.loop.call_soon_threadsafe(
+                                        connection.data_channel.send, "FROMBOT>" + obj["response"] + "AUDIO>")
+                            else:
+                                if "audio" in obj:
+                                    self.loop.call_soon_threadsafe(
+                                        connection.data_channel.send, "FROMBOTCHUNK>" + obj["response"] + "AUDIO>" + obj["audio"])
+                                else:
+                                    self.loop.call_soon_threadsafe(
+                                        connection.data_channel.send, "FROMBOTCHUNK>" + obj["response"] + "AUDIO>")
+                                # connection.reply_track.enqueue_wav(MediaPlayer(file_name).audio)
 
     async def offer(self, request):
         data = await request.json()
